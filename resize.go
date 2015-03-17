@@ -27,6 +27,7 @@ package resize
 import (
 	"image"
 	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -78,7 +79,7 @@ var blur = 1.0
 // If one of the parameters width or height is set to 0, its size will be calculated so that
 // the aspect ratio is that of the originating image.
 // The resizing algorithm uses channels for parallel computation.
-func Resize(width, height uint, img image.Image, interp InterpolationFunction) image.Image {
+func Resize(width, height uint, img image.Image, interp InterpolationFunction) (image.Image, error) {
 	scaleX, scaleY := calcFactors(width, height, float64(img.Bounds().Dx()), float64(img.Bounds().Dy()))
 	if width == 0 {
 		width = uint(0.7 + float64(img.Bounds().Dx())/scaleX)
@@ -89,7 +90,7 @@ func Resize(width, height uint, img image.Image, interp InterpolationFunction) i
 
 	// Trivial case: return input image
 	if int(width) == img.Bounds().Dx() && int(height) == img.Bounds().Dy() {
-		return img
+		return img, nil
 	}
 
 	if interp == NearestNeighbor {
@@ -99,6 +100,7 @@ func Resize(width, height uint, img image.Image, interp InterpolationFunction) i
 	taps, kernel := interp.kernel()
 	cpus := runtime.NumCPU()
 	wg := sync.WaitGroup{}
+	var panics chan string
 
 	// Generic access to image.Image is slow in tight loops.
 	// The optimal access has to be determined from the concrete image type.
@@ -111,27 +113,38 @@ func Resize(width, height uint, img image.Image, interp InterpolationFunction) i
 		// horizontal filter, results in transposed temporary image
 		coeffs, offset, filterLength := createWeights8(temp.Bounds().Dy(), taps, blur, scaleX, kernel)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*image.RGBA)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeRGBA(input, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		// horizontal filter on transposed image, result is not transposed
 		coeffs, offset, filterLength = createWeights8(result.Bounds().Dy(), taps, blur, scaleY, kernel)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*image.RGBA)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeRGBA(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result, nil
 	case *image.YCbCr:
 		// 8-bit precision
 		// accessing the YCbCr arrays in a tight loop is slow.
@@ -142,26 +155,37 @@ func Resize(width, height uint, img image.Image, interp InterpolationFunction) i
 		coeffs, offset, filterLength := createWeights8(temp.Bounds().Dy(), taps, blur, scaleX, kernel)
 		in := imageYCbCrToYCC(input)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*ycc)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeYCbCr(in, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		coeffs, offset, filterLength = createWeights8(result.Bounds().Dy(), taps, blur, scaleY, kernel)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*ycc)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeYCbCr(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result.YCbCr()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result.YCbCr(), nil
 	case *image.RGBA64:
 		// 16-bit precision
 		temp := image.NewRGBA64(image.Rect(0, 0, input.Bounds().Dy(), int(width)))
@@ -170,27 +194,38 @@ func Resize(width, height uint, img image.Image, interp InterpolationFunction) i
 		// horizontal filter, results in transposed temporary image
 		coeffs, offset, filterLength := createWeights16(temp.Bounds().Dy(), taps, blur, scaleX, kernel)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*image.RGBA64)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeRGBA64(input, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		// horizontal filter on transposed image, result is not transposed
 		coeffs, offset, filterLength = createWeights16(result.Bounds().Dy(), taps, blur, scaleY, kernel)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*image.RGBA64)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeGeneric(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result, nil
 	case *image.Gray:
 		// 8-bit precision
 		temp := image.NewGray(image.Rect(0, 0, input.Bounds().Dy(), int(width)))
@@ -199,27 +234,38 @@ func Resize(width, height uint, img image.Image, interp InterpolationFunction) i
 		// horizontal filter, results in transposed temporary image
 		coeffs, offset, filterLength := createWeights8(temp.Bounds().Dy(), taps, blur, scaleX, kernel)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*image.Gray)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeGray(input, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		// horizontal filter on transposed image, result is not transposed
 		coeffs, offset, filterLength = createWeights8(result.Bounds().Dy(), taps, blur, scaleY, kernel)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*image.Gray)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeGray(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result, nil
 	case *image.Gray16:
 		// 16-bit precision
 		temp := image.NewGray16(image.Rect(0, 0, input.Bounds().Dy(), int(width)))
@@ -228,27 +274,38 @@ func Resize(width, height uint, img image.Image, interp InterpolationFunction) i
 		// horizontal filter, results in transposed temporary image
 		coeffs, offset, filterLength := createWeights16(temp.Bounds().Dy(), taps, blur, scaleX, kernel)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*image.Gray16)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeGray16(input, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		// horizontal filter on transposed image, result is not transposed
 		coeffs, offset, filterLength = createWeights16(result.Bounds().Dy(), taps, blur, scaleY, kernel)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*image.Gray16)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeGray16(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result, nil
 	default:
 		// 16-bit precision
 		temp := image.NewRGBA64(image.Rect(0, 0, img.Bounds().Dy(), int(width)))
@@ -257,34 +314,46 @@ func Resize(width, height uint, img image.Image, interp InterpolationFunction) i
 		// horizontal filter, results in transposed temporary image
 		coeffs, offset, filterLength := createWeights16(temp.Bounds().Dy(), taps, blur, scaleX, kernel)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*image.RGBA64)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeGeneric(img, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		// horizontal filter on transposed image, result is not transposed
 		coeffs, offset, filterLength = createWeights16(result.Bounds().Dy(), taps, blur, scaleY, kernel)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*image.RGBA64)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				resizeRGBA64(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result, nil
 	}
 }
 
-func resizeNearest(width, height uint, scaleX, scaleY float64, img image.Image, interp InterpolationFunction) image.Image {
+func resizeNearest(width, height uint, scaleX, scaleY float64, img image.Image, interp InterpolationFunction) (image.Image, error) {
 	taps, _ := interp.kernel()
 	cpus := runtime.NumCPU()
 	wg := sync.WaitGroup{}
+	var panics chan string
 
 	switch input := img.(type) {
 	case *image.RGBA:
@@ -295,27 +364,38 @@ func resizeNearest(width, height uint, scaleX, scaleY float64, img image.Image, 
 		// horizontal filter, results in transposed temporary image
 		coeffs, offset, filterLength := createWeightsNearest(temp.Bounds().Dy(), taps, blur, scaleX)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*image.RGBA)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestRGBA(input, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		// horizontal filter on transposed image, result is not transposed
 		coeffs, offset, filterLength = createWeightsNearest(result.Bounds().Dy(), taps, blur, scaleY)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*image.RGBA)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestRGBA(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result, nil
 	case *image.YCbCr:
 		// 8-bit precision
 		// accessing the YCbCr arrays in a tight loop is slow.
@@ -326,26 +406,37 @@ func resizeNearest(width, height uint, scaleX, scaleY float64, img image.Image, 
 		coeffs, offset, filterLength := createWeightsNearest(temp.Bounds().Dy(), taps, blur, scaleX)
 		in := imageYCbCrToYCC(input)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*ycc)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestYCbCr(in, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		coeffs, offset, filterLength = createWeightsNearest(result.Bounds().Dy(), taps, blur, scaleY)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*ycc)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestYCbCr(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result.YCbCr()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result.YCbCr(), nil
 	case *image.RGBA64:
 		// 16-bit precision
 		temp := image.NewRGBA64(image.Rect(0, 0, input.Bounds().Dy(), int(width)))
@@ -354,27 +445,38 @@ func resizeNearest(width, height uint, scaleX, scaleY float64, img image.Image, 
 		// horizontal filter, results in transposed temporary image
 		coeffs, offset, filterLength := createWeightsNearest(temp.Bounds().Dy(), taps, blur, scaleX)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*image.RGBA64)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestRGBA64(input, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		// horizontal filter on transposed image, result is not transposed
 		coeffs, offset, filterLength = createWeightsNearest(result.Bounds().Dy(), taps, blur, scaleY)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*image.RGBA64)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestGeneric(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result, nil
 	case *image.Gray:
 		// 8-bit precision
 		temp := image.NewGray(image.Rect(0, 0, input.Bounds().Dy(), int(width)))
@@ -383,27 +485,38 @@ func resizeNearest(width, height uint, scaleX, scaleY float64, img image.Image, 
 		// horizontal filter, results in transposed temporary image
 		coeffs, offset, filterLength := createWeightsNearest(temp.Bounds().Dy(), taps, blur, scaleX)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*image.Gray)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestGray(input, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		// horizontal filter on transposed image, result is not transposed
 		coeffs, offset, filterLength = createWeightsNearest(result.Bounds().Dy(), taps, blur, scaleY)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*image.Gray)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestGray(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result, nil
 	case *image.Gray16:
 		// 16-bit precision
 		temp := image.NewGray16(image.Rect(0, 0, input.Bounds().Dy(), int(width)))
@@ -412,27 +525,39 @@ func resizeNearest(width, height uint, scaleX, scaleY float64, img image.Image, 
 		// horizontal filter, results in transposed temporary image
 		coeffs, offset, filterLength := createWeightsNearest(temp.Bounds().Dy(), taps, blur, scaleX)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*image.Gray16)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestGray16(input, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
+
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		// horizontal filter on transposed image, result is not transposed
 		coeffs, offset, filterLength = createWeightsNearest(result.Bounds().Dy(), taps, blur, scaleY)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*image.Gray16)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestGray16(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result, nil
 	default:
 		// 16-bit precision
 		temp := image.NewRGBA64(image.Rect(0, 0, img.Bounds().Dy(), int(width)))
@@ -441,27 +566,38 @@ func resizeNearest(width, height uint, scaleX, scaleY float64, img image.Image, 
 		// horizontal filter, results in transposed temporary image
 		coeffs, offset, filterLength := createWeightsNearest(temp.Bounds().Dy(), taps, blur, scaleX)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(temp, i, cpus).(*image.RGBA64)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestGeneric(img, slice, scaleX, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
 
 		// horizontal filter on transposed image, result is not transposed
 		coeffs, offset, filterLength = createWeightsNearest(result.Bounds().Dy(), taps, blur, scaleY)
 		wg.Add(cpus)
+		panics = makePanicChan(cpus)
 		for i := 0; i < cpus; i++ {
 			slice := makeSlice(result, i, cpus).(*image.RGBA64)
 			go func() {
+				defer recoverfn(panics)
 				defer wg.Done()
 				nearestRGBA64(temp, slice, scaleY, coeffs, offset, filterLength)
 			}()
 		}
 		wg.Wait()
-		return result
+		if err := retrieveErrors(panics); err != nil {
+			return nil, err
+		}
+
+		return result, nil
 	}
 
 }
@@ -494,4 +630,55 @@ type imageWithSubImage interface {
 
 func makeSlice(img imageWithSubImage, i, n int) image.Image {
 	return img.SubImage(image.Rect(img.Bounds().Min.X, img.Bounds().Min.Y+i*img.Bounds().Dy()/n, img.Bounds().Max.X, img.Bounds().Min.Y+(i+1)*img.Bounds().Dy()/n))
+}
+
+func recoverfn(panics chan string) {
+	if rc := recover(); rc != nil {
+		str, ok := rc.(string)
+		if ok {
+			panics <- str
+		} else {
+			panics <- "Unknown panic"
+		}
+	}
+}
+
+func makePanicChan(size int) chan string {
+	return make(chan string, size)
+}
+
+type resizeErrors struct {
+	errs []string
+}
+
+func newResizeErrors(max int) *resizeErrors {
+	r := resizeErrors{}
+	r.errs = make([]string, 0, max)
+	return &r
+}
+
+func (r *resizeErrors) Error() string {
+	return strings.Join(r.errs, ", ")
+}
+
+func retrieveErrors(panics chan string) error {
+	var e *resizeErrors
+	close(panics)
+	max := cap(panics)
+
+	if len(panics) > 0 {
+		for str := range panics {
+			if e == nil {
+				e = newResizeErrors(max)
+			}
+
+			e.errs = append(e.errs, str)
+		}
+	}
+
+	if e == nil {
+		return nil
+	} else {
+		return e
+	}
 }

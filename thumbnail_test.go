@@ -31,7 +31,10 @@ func TestThumbnail(t *testing.T) {
 	for i, tt := range thumbnailTests {
 		img := image.NewGray16(image.Rect(0, 0, tt.origWidth, tt.origHeight))
 
-		outImg := Thumbnail(tt.maxWidth, tt.maxHeight, img, NearestNeighbor)
+		outImg, err := Thumbnail(tt.maxWidth, tt.maxHeight, img, NearestNeighbor)
+		if err != nil {
+			t.Fail()
+		}
 
 		newWidth := uint(outImg.Bounds().Dx())
 		newHeight := uint(outImg.Bounds().Dy())

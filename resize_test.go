@@ -15,14 +15,17 @@ func init() {
 }
 
 func Test_Param1(t *testing.T) {
-	m := Resize(0, 0, img, NearestNeighbor)
+	m, _ := Resize(0, 0, img, NearestNeighbor)
 	if m.Bounds() != img.Bounds() {
 		t.Fail()
 	}
 }
 
 func Test_Param2(t *testing.T) {
-	m := Resize(100, 0, img, NearestNeighbor)
+	m, err := Resize(100, 0, img, NearestNeighbor)
+	if err != nil {
+		t.Fail()
+	}
 	if m.Bounds() != image.Rect(0, 0, 100, 100) {
 		t.Fail()
 	}
@@ -31,7 +34,11 @@ func Test_Param2(t *testing.T) {
 func Test_ZeroImg(t *testing.T) {
 	zeroImg := image.NewGray16(image.Rect(0, 0, 0, 0))
 
-	m := Resize(0, 0, zeroImg, NearestNeighbor)
+	m, err := Resize(0, 0, zeroImg, NearestNeighbor)
+	if err != nil {
+		t.Fail()
+	}
+
 	if m.Bounds() != zeroImg.Bounds() {
 		t.Fail()
 	}
@@ -40,7 +47,11 @@ func Test_ZeroImg(t *testing.T) {
 func Test_CorrectResize(t *testing.T) {
 	zeroImg := image.NewGray16(image.Rect(0, 0, 256, 256))
 
-	m := Resize(60, 0, zeroImg, NearestNeighbor)
+	m, err := Resize(60, 0, zeroImg, NearestNeighbor)
+	if err != nil {
+		t.Fail()
+	}
+
 	if m.Bounds() != image.Rect(0, 0, 60, 60) {
 		t.Fail()
 	}
@@ -53,7 +64,11 @@ func Test_SameColor(t *testing.T) {
 			img.SetRGBA(x, y, color.RGBA{0x80, 0x80, 0x80, 0xFF})
 		}
 	}
-	out := Resize(10, 10, img, Lanczos3)
+	out, err := Resize(10, 10, img, Lanczos3)
+	if err != nil {
+		t.Fail()
+	}
+
 	for y := out.Bounds().Min.Y; y < out.Bounds().Max.Y; y++ {
 		for x := out.Bounds().Min.X; x < out.Bounds().Max.X; x++ {
 			color := img.At(x, y).(color.RGBA)
@@ -66,19 +81,26 @@ func Test_SameColor(t *testing.T) {
 
 func Test_Bounds(t *testing.T) {
 	img := image.NewRGBA(image.Rect(20, 10, 200, 99))
-	out := Resize(80, 80, img, Lanczos2)
+	out, err := Resize(80, 80, img, Lanczos2)
+	if err != nil {
+		t.Fail()
+	}
+
 	out.At(0, 0)
 }
 
 func Test_SameSizeReturnsOriginal(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
-	out := Resize(0, 0, img, Lanczos2)
+	out, err := Resize(0, 0, img, Lanczos2)
+	if err != nil {
+		t.Fail()
+	}
 
 	if img != out {
 		t.Fail()
 	}
 
-	out = Resize(10, 10, img, Lanczos2)
+	out, _ = Resize(10, 10, img, Lanczos2)
 
 	if img != out {
 		t.Fail()
@@ -87,8 +109,13 @@ func Test_SameSizeReturnsOriginal(t *testing.T) {
 
 func Benchmark_BigResizeLanczos3(b *testing.B) {
 	var m image.Image
+	var err error
 	for i := 0; i < b.N; i++ {
-		m = Resize(1000, 1000, img, Lanczos3)
+		m, err = Resize(1000, 1000, img, Lanczos3)
+		if err != nil {
+			b.FailNow()
+		}
+
 	}
 	m.At(0, 0)
 }
@@ -97,8 +124,13 @@ func Benchmark_Reduction(b *testing.B) {
 	largeImg := image.NewRGBA(image.Rect(0, 0, 1000, 1000))
 
 	var m image.Image
+	var err error
 	for i := 0; i < b.N; i++ {
-		m = Resize(300, 300, largeImg, Bicubic)
+		m, err = Resize(300, 300, largeImg, Bicubic)
+		if err != nil {
+			b.FailNow()
+		}
+
 	}
 	m.At(0, 0)
 }
@@ -108,8 +140,13 @@ func jpegThumb(b *testing.B, interp InterpolationFunction) {
 	input := image.NewYCbCr(image.Rect(0, 0, 4896, 3264), image.YCbCrSubsampleRatio422)
 
 	var output image.Image
+	var err error
 	for i := 0; i < b.N; i++ {
-		output = Resize(800, 0, input, interp)
+		output, err = Resize(800, 0, input, interp)
+		if err != nil {
+			b.FailNow()
+		}
+
 	}
 
 	output.At(0, 0)
