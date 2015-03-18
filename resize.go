@@ -610,13 +610,12 @@ func makeSlice(img imageWithSubImage, i, n int) image.Image {
 
 func recoverfn(wg *sync.WaitGroup, panics chan string) {
 	defer wg.Done()
-
 	if rc := recover(); rc != nil {
-		str, ok := rc.(string)
+		e, ok := rc.(error)
 		if ok {
-			panics <- str
+			panics <- e.Error()
 		} else {
-			panics <- "Unknown panic"
+			panics <- "Unknown panic error"
 		}
 	}
 }
